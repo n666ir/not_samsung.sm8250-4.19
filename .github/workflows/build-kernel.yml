@@ -1,0 +1,95 @@
+name: Build Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Create GitHub Release"
+        required: true
+        default: true
+        type: boolean
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build r8q Kernel
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout kernel
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache flex libelf-dev libssl-dev lld llvm clang python3 rsync unzip zip
+
+      - name: Build kernel
+        run: |
+          mkdir -p out-r8q
+          make O=out-r8q ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 vendor/kona-perf_defconfig vendor/samsung/kona-sec-common.config vendor/samsung/r8q.config vendor/not/localversion.config
+          make O=out-r8q ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 -j"$(nproc)" Image
+
+      - name: Prepare release
+        run: |
+          mkdir -p release
+          cp out-r8q/arch/arm64/boot/Image release/Image
+          sha256sum release/Image > release/SHA256SUMS
+          PREVIOUS="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
+          {
+            echo "# Kernel ${GITHUB_REF_NAME}"
+            echo
+            echo "## Build"
+            echo
+            echo "- Device: Samsung Galaxy S20 FE 5G (r8q)"
+            echo "- Kernel: $(make -s O=out-r8q kernelversion)"
+            echo "- Architecture: arm64"
+            echo "- Compiler: LLVM/Clang"
+            echo "- KernelSU: v3.3.0-60"
+            echo
+            echo "## Changes"
+            echo
+            if [ -n "$PREVIOUS" ]; then
+              git log --pretty=format:'- %h %s' "${PREVIOUS}..HEAD"
+            else
+              git log --pretty=format:'- %h %s' -20
+            fi
+            echo
+            echo
+            echo "## SHA256"
+            echo
+            echo '```'
+            cat release/SHA256SUMS
+            echo '```'
+          } > release/CHANGELOG.md
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-r8q-${{ github.sha }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Kernel r8q ${{ github.ref_name }}
+          body_path: release/CHANGELOG.md
+          files: |
+            release/Image
+            release/SHA256SUMS
+            release/CHANGELOG.md
+          draft: false
+          prerelease: false
+          generate_release_notes: false
