@@ -6,7 +6,7 @@ on:
       model:
         description: 'Device Model Code (x1q, c1q, c2q, z3q, y2q, r8q, gts7xl, etc.)'
         required: true
-        default: 'x1q'
+        default: 'r8q'
       variant:
         description: 'SELinux Variant'
         required: true
@@ -27,28 +27,25 @@ jobs:
       - name: Clean up existing KernelSU directory
         run: |
           echo "Removing existing drivers/kernelsu directory..."
-          # Force remove any existing directory or submodule to prevent clone conflicts
           git rm -rf drivers/kernelsu 2>/dev/null || true
           rm -rf drivers/kernelsu
 
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ca-certificates flex git libelf-dev libssl-dev ncurses-base wget zip zstd jq curl
+          # Added gcc-aarch64-linux-gnu and gcc-arm-linux-gnueabi to satisfy Kconfig checks
+          sudo apt-get install -y bc bison build-essential ca-certificates flex git libelf-dev libssl-dev ncurses-base wget zip zstd jq curl gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
       - name: Setup KernelSU (backslashxx fork)
         run: |
           echo "Cloning backslashxx KernelSU..."
           git clone --depth=1 https://github.com/backslashxx/KernelSU drivers/kernelsu
           
-          # Register KSU in Makefile and Kconfig
           grep -q "kernelsu" drivers/Makefile || echo "obj-\$(CONFIG_KSU) += kernelsu/" >> drivers/Makefile
           grep -q "kernelsu" drivers/Kconfig || echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
           
           echo "Applying Multi-Manager Bypass Patch..."
-          # Dynamically search all C/H files in the kernel directory and patch manager checks
           find drivers/kernelsu/kernel -type f \( -name "*.c" -o -name "*.h" \) | while read file; do
-            # Bypass UID checks and specific manager verification functions
             sed -i 's/uid == ksu_manager_uid/true \/\* Multi-Manager \*\/ || uid == ksu_manager_uid/g' "$file"
             sed -i 's/ksu_is_manager(uid)/true \/\* Multi-Manager \*\/ || ksu_is_manager(uid)/g' "$file"
             sed -i 's/ksu_is_manager_apk(uid)/true \/\* Multi-Manager \*\/ || ksu_is_manager_apk(uid)/g' "$file"
@@ -113,8 +110,9 @@ jobs:
           
           mkdir -p out
           echo "Running make defconfig..."
-          make O=out ARCH=arm64 $DEFCONFIG
-          make O=out ARCH=arm64 olddefconfig
+          # Added CC=clang to defconfig steps to ensure Kconfig uses Clang
+          make O=out ARCH=arm64 CC=clang $DEFCONFIG
+          make O=out ARCH=arm64 CC=clang olddefconfig
           
           MAKE_ARGS="-j$(nproc) O=out ARCH=arm64 CC=clang LD=ld.lld AS=llvm-as AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1"
           
@@ -129,7 +127,6 @@ jobs:
         run: |
           MODEL="${{ github.event.inputs.model }}"
           echo "Cloning AnyKernel3..."
-          # Try device-specific branch first, fallback to main/master if missing
           git clone -q -b "$MODEL" https://github.com/notkernel-oss/AnyKernel3 AnyKernel3 || git clone -q https://github.com/notkernel-oss/AnyKernel3 AnyKernel3
           
           cp out/arch/arm64/boot/dtbo.img AnyKernel3/
