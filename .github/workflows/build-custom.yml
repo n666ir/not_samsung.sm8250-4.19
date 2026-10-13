@@ -1,0 +1,141 @@
+name: Build Custom SM8250 Kernel (Android 17 + Multi-Manager)
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'Device Model Code (x1q, c1q, c2q, z3q, y2q, r8q, gts7xl, etc.)'
+        required: true
+        default: 'x1q'
+      variant:
+        description: 'SELinux Variant'
+        required: true
+        default: 'ksu'
+        type: choice
+        options:
+          - ksu
+          - ksu-permissive
+
+jobs:
+  build:
+    name: Build Kernel
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ca-certificates flex git libelf-dev libssl-dev ncurses-base wget zip zstd jq curl
+
+      - name: Setup KernelSU (backslashxx fork)
+        run: |
+          echo "Cloning backslashxx KernelSU..."
+          git clone --depth=1 https://github.com/backslashxx/KernelSU drivers/kernelsu
+          
+          # Register KSU in Makefile and Kconfig
+          grep -q "kernelsu" drivers/Makefile || echo "obj-\$(CONFIG_KSU) += kernelsu/" >> drivers/Makefile
+          grep -q "kernelsu" drivers/Kconfig || echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+          
+          echo "Applying Multi-Manager Bypass Patch..."
+          MANAGER_FILE="drivers/kernelsu/kernel/manager.c"
+          if [ -f "$MANAGER_FILE" ]; then
+            # Force signature checks to always return true so ANY manager app works
+            sed -i 's/return check_manager_signature(uid);/return true; \/\* Multi-Manager Bypass \*\//g' "$MANAGER_FILE"
+            sed -i '/bool ksu_is_manager/,/^}/ s/return false/return true/g' "$MANAGER_FILE"
+            sed -i '/bool is_manager_apk/,/^}/ s/return false/return true/g' "$MANAGER_FILE"
+          fi
+
+      - name: Setup AOSP & Android 17 Configs (Strip OneUI)
+        run: |
+          mkdir -p vendor/not
+          cat <<EOF > vendor/not/custom_aosp.config
+          # ==========================================
+          # DISABLE ONEUI / SAMSUNG BLOAT
+          # ==========================================
+          # CONFIG_SEC_PLATFORM is not set
+          # CONFIG_SENSORS_SSP is not set
+          # CONFIG_SEC_FACTORY is not set
+          # CONFIG_SEC_DEBUG is not set
+          # CONFIG_SEC_THERMAL is not set
+          # CONFIG_SEC_BATTERY is not set
+          # CONFIG_SEC_VIBRATION is not set
+          # CONFIG_SAMSUNG_PM is not set
+          # CONFIG_SAMSUNG_PM_DEBUG is not set
+
+          # ==========================================
+          # ANDROID 17 (AOSP) REQUIREMENTS (eBPF)
+          # ==========================================
+          CONFIG_BPF_SYSCALL=y
+          CONFIG_BPF_JIT=y
+          CONFIG_CGROUP_BPF=y
+          CONFIG_NETFILTER_XT_MATCH_BPF=y
+
+          # ==========================================
+          # KERNELSU CONFIGURATION
+          # ==========================================
+          CONFIG_KSU=y
+          CONFIG_KSU_MANUAL_HOOK=y
+          # CONFIG_KSU_KPROBES_HOOK is not set
+          EOF
+
+      - name: Download Neutron Clang Toolchain
+        run: |
+          mkdir -p tc/clang
+          echo "Downloading latest Neutron Clang..."
+          ASSET_URL=$(curl -fsSL https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest | jq -r '.assets[] | select(.name | endswith(".tar.zst")) | .browser_download_url' | head -n1)
+          curl -L "$ASSET_URL" | tar --zstd -x -C tc/clang --strip-components=1
+          echo "$(pwd)/tc/clang/bin" >> $GITHUB_PATH
+
+      - name: Compile Kernel
+        run: |
+          MODEL="${{ github.event.inputs.model }}"
+          export PLATFORM_VERSION=11
+          
+          PLATFORM_DEFCONFIG="vendor/kona-perf_defconfig"
+          COMMON_DEFCONFIG="vendor/samsung/kona-sec-common.config"
+          PROJECT_CONFIG="vendor/samsung/${MODEL}.config"
+          EXTRA_CONFIG="vendor/not/ksu.config vendor/not/custom_aosp.config vendor/not/localversion.config"
+          
+          if [ "${{ github.event.inputs.variant }}" == "ksu-permissive" ]; then
+            EXTRA_CONFIG="$EXTRA_CONFIG vendor/not/permissive.config"
+          fi
+          
+          DEFCONFIG="$PLATFORM_DEFCONFIG $COMMON_DEFCONFIG $PROJECT_CONFIG $EXTRA_CONFIG"
+          
+          mkdir -p out
+          echo "Running make defconfig..."
+          make O=out ARCH=arm64 $DEFCONFIG
+          make O=out ARCH=arm64 olddefconfig
+          
+          MAKE_ARGS="-j$(nproc) O=out ARCH=arm64 CC=clang LD=ld.lld AS=llvm-as AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1"
+          
+          echo "Starting Compilation..."
+          make $MAKE_ARGS dtbo.img Image.gz
+          
+          # Generate DTB
+          mkdir -p out/arch/arm64/boot/dts/vendor/qcom
+          cat $(find out/arch/arm64/boot/dts/vendor/qcom -name "*.dtb" | sort) > out/arch/arm64/boot/dtb
+
+      - name: Package into AnyKernel3
+        run: |
+          MODEL="${{ github.event.inputs.model }}"
+          echo "Cloning AnyKernel3..."
+          # Try to clone the device-specific branch, fallback to master if it fails
+          git clone -q -b "$MODEL" https://github.com/notkernel-oss/AnyKernel3 AnyKernel3 || git clone -q https://github.com/notkernel-oss/AnyKernel3 AnyKernel3
+          
+          cp out/arch/arm64/boot/dtbo.img AnyKernel3/
+          cp out/arch/arm64/boot/Image.gz AnyKernel3/
+          cp out/arch/arm64/boot/dtb AnyKernel3/
+          
+          cd AnyKernel3
+          zip -r9 "../CustomKernel-${MODEL}-Android17.zip" * -x .git README.md *placeholder
+          cd ..
+
+      - name: Upload Kernel Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CustomKernel-${{ github.event.inputs.model }}-Android17
+          path: CustomKernel-${{ github.event.inputs.model }}-Android17.zip
+          retention-days: 7
