@@ -21,8 +21,12 @@ jobs:
     name: Build Kernel
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
+      - name: Checkout Repository (with Submodules)
         uses: actions/checkout@v4
+        with:
+          # This is the critical fix: it downloads hidden dependencies like fs/nomount
+          submodules: 'recursive'
+          fetch-depth: 0
 
       - name: Clean up existing KernelSU directory
         run: |
@@ -45,7 +49,6 @@ jobs:
           mkdir -p drivers/kernelsu
           
           # Copy ONLY the kernel source code into drivers/kernelsu
-          # This ensures drivers/kernelsu/Kconfig exists exactly where the Makefile expects it
           cp -r /tmp/ksu_temp/kernel/* drivers/kernelsu/
           rm -rf /tmp/ksu_temp
           
