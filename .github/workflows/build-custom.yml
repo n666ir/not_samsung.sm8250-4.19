@@ -24,26 +24,23 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          # Do NOT use submodules: recursive here, because one submodule is dead
           fetch-depth: 0
 
-      - name: Fix and Initialize Submodules
+      - name: Fix and Initialize Submodules & Setup NoMount
         run: |
           echo "Removing broken KernelSU submodule entry..."
-          # Remove the dead doubledashdot/sKernelSU submodule
           git config -f .gitmodules --remove-section submodule.KernelSU || true
           rm -rf KernelSU
           
           echo "Initializing other submodules..."
           git submodule sync --recursive
-          # Ignore errors just in case Baseband-guard or NoMount fail
+          # Ignore errors just in case Baseband-guard fails to clone
           git submodule update --init --recursive || true
           
-          echo "Ensuring fs/nomount exists (Required by Kconfig)..."
-          if [ ! -d "fs/nomount" ]; then
-            echo "Cloning nomount into fs/nomount..."
-            git clone https://github.com/maxsteeel/nomount.git fs/nomount || true
-          fi
+          echo "Running official NoMount setup script..."
+          # This script clones NoMount, creates a proper symlink (fs/nomount -> kernel/src),
+          # and safely patches fs/Makefile and fs/Kconfig for you!
+          curl -sSL https://raw.githubusercontent.com/maxsteeel/nomount/master/kernel/setup.sh | bash
 
       - name: Clean up existing KernelSU directory
         run: |
