@@ -26,21 +26,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Fix and Initialize Submodules & Setup NoMount
+      - name: Fix Submodules and Setup NoMount
         run: |
-          echo "Removing broken KernelSU submodule entry..."
-          git config -f .gitmodules --remove-section submodule.KernelSU || true
-          rm -rf KernelSU
+          echo "Cleaning broken KernelSU submodule from git config..."
+          # Remove orphaned entries from .git/config to prevent 'fatal: No url found'
+          git config --local --remove-section submodule.KernelSU 2>/dev/null || true
+          git config --local --remove-section submodule.NoMount 2>/dev/null || true
           
-          echo "Initializing other submodules..."
-          git submodule sync --recursive
-          # Ignore errors just in case Baseband-guard fails to clone
+          rm -rf .git/modules/KernelSU .git/modules/NoMount
+          rm -rf KernelSU NoMount fs/nomount
+          
+          echo "Syncing and updating valid submodules..."
+          git submodule sync --recursive || true
           git submodule update --init --recursive || true
           
-          echo "Running official NoMount setup script..."
-          # This script clones NoMount, creates a proper symlink (fs/nomount -> kernel/src),
-          # and safely patches fs/Makefile and fs/Kconfig for you!
-          curl -sSL https://raw.githubusercontent.com/maxsteeel/nomount/master/kernel/setup.sh | bash
+          echo "Integrating NoMount manually (Official Method)..."
+          git clone --depth=1 https://github.com/maxsteeel/nomount.git NoMount_temp
+          
+          mkdir -p fs/nomount
+          # Copy all files including hidden ones from kernel/src to fs/nomount
+          cp -a NoMount_temp/kernel/src/. fs/nomount/
+          
+          # Ensure fs/Makefile has nomount
+          if ! grep -q "nomount" fs/Makefile; then
+              echo "obj-\$(CONFIG_NOMOUNT) += nomount/" >> fs/Makefile
+          fi
+          
+          # Ensure fs/Kconfig has nomount source
+          if ! grep -q "fs/nomount/Kconfig" fs/Kconfig; then
+              echo 'source "fs/nomount/Kconfig"' >> fs/Kconfig
+          fi
+          
+          rm -rf NoMount_temp
 
       - name: Clean up existing KernelSU directory
         run: |
@@ -59,7 +76,7 @@ jobs:
           git clone --depth=1 https://github.com/backslashxx/KernelSU /tmp/ksu_temp
           
           mkdir -p drivers/kernelsu
-          cp -r /tmp/ksu_temp/kernel/* drivers/kernelsu/
+          cp -a /tmp/ksu_temp/kernel/. drivers/kernelsu/
           rm -rf /tmp/ksu_temp
           
           grep -q "kernelsu" drivers/Makefile || echo "obj-\$(CONFIG_KSU) += kernelsu/" >> drivers/Makefile
