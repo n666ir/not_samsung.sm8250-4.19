@@ -21,12 +21,29 @@ jobs:
     name: Build Kernel
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository (with Submodules)
+      - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          # This is the critical fix: it downloads hidden dependencies like fs/nomount
-          submodules: 'recursive'
+          # Do NOT use submodules: recursive here, because one submodule is dead
           fetch-depth: 0
+
+      - name: Fix and Initialize Submodules
+        run: |
+          echo "Removing broken KernelSU submodule entry..."
+          # Remove the dead doubledashdot/sKernelSU submodule
+          git config -f .gitmodules --remove-section submodule.KernelSU || true
+          rm -rf KernelSU
+          
+          echo "Initializing other submodules..."
+          git submodule sync --recursive
+          # Ignore errors just in case Baseband-guard or NoMount fail
+          git submodule update --init --recursive || true
+          
+          echo "Ensuring fs/nomount exists (Required by Kconfig)..."
+          if [ ! -d "fs/nomount" ]; then
+            echo "Cloning nomount into fs/nomount..."
+            git clone https://github.com/maxsteeel/nomount.git fs/nomount || true
+          fi
 
       - name: Clean up existing KernelSU directory
         run: |
@@ -42,24 +59,17 @@ jobs:
       - name: Setup KernelSU (backslashxx fork)
         run: |
           echo "Cloning backslashxx KernelSU..."
-          # Clone the whole repo to a temporary directory
           git clone --depth=1 https://github.com/backslashxx/KernelSU /tmp/ksu_temp
           
-          # Create the target directory
           mkdir -p drivers/kernelsu
-          
-          # Copy ONLY the kernel source code into drivers/kernelsu
           cp -r /tmp/ksu_temp/kernel/* drivers/kernelsu/
           rm -rf /tmp/ksu_temp
           
-          # Register KSU in Makefile and Kconfig
           grep -q "kernelsu" drivers/Makefile || echo "obj-\$(CONFIG_KSU) += kernelsu/" >> drivers/Makefile
           grep -q "kernelsu" drivers/Kconfig || echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
           
           echo "Applying Multi-Manager Bypass Patch..."
-          # Dynamically search all C/H files in the kernel directory and patch manager checks
           find drivers/kernelsu -type f \( -name "*.c" -o -name "*.h" \) | while read file; do
-            # Bypass UID checks and specific manager verification functions
             sed -i 's/uid == ksu_manager_uid/true \/\* Multi-Manager \*\/ || uid == ksu_manager_uid/g' "$file"
             sed -i 's/ksu_is_manager(uid)/true \/\* Multi-Manager \*\/ || ksu_is_manager(uid)/g' "$file"
             sed -i 's/ksu_is_manager_apk(uid)/true \/\* Multi-Manager \*\/ || ksu_is_manager_apk(uid)/g' "$file"
@@ -70,9 +80,7 @@ jobs:
         run: |
           mkdir -p vendor/not
           cat <<EOF > vendor/not/custom_aosp.config
-          # ==========================================
           # DISABLE ONEUI / SAMSUNG BLOAT
-          # ==========================================
           # CONFIG_SEC_PLATFORM is not set
           # CONFIG_SENSORS_SSP is not set
           # CONFIG_SEC_FACTORY is not set
@@ -83,17 +91,13 @@ jobs:
           # CONFIG_SAMSUNG_PM is not set
           # CONFIG_SAMSUNG_PM_DEBUG is not set
 
-          # ==========================================
           # ANDROID 17 (AOSP) REQUIREMENTS (eBPF)
-          # ==========================================
           CONFIG_BPF_SYSCALL=y
           CONFIG_BPF_JIT=y
           CONFIG_CGROUP_BPF=y
           CONFIG_NETFILTER_XT_MATCH_BPF=y
 
-          # ==========================================
           # KERNELSU CONFIGURATION
-          # ==========================================
           CONFIG_KSU=y
           CONFIG_KSU_MANUAL_HOOK=y
           # CONFIG_KSU_KPROBES_HOOK is not set
